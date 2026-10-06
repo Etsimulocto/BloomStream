@@ -63,7 +63,15 @@ def _record_path(template: str) -> str:
 def build_ffmpeg_command(config:AppConfig, mode:str='stream')->list[str]:
     if mode not in {'stream','record'}: raise PipelineError('mode must be stream or record')
     out=config.output
-    if mode=='stream' and (not out.endpoint or not out.stream_key): raise PipelineError('Streaming endpoint and stream key are required.')
+    if mode=='stream':
+        endpoint = out.endpoint.strip()
+        stream_key = out.stream_key.strip()
+        if not endpoint or not stream_key:
+            raise PipelineError('Streaming endpoint and stream key are required.')
+        if not endpoint.lower().startswith(('rtmp://','rtmps://')):
+            raise PipelineError('Streaming endpoint must start with rtmp:// or rtmps://.')
+        if stream_key.lower().startswith(('rtmp://','rtmps://','http://','https://')):
+            raise PipelineError('The Stream Key field contains a URL. Paste only the YouTube stream key there, not the server URL.')
 
     cmd=['ffmpeg','-hide_banner','-loglevel','warning','-y']
     boxes=_layout_boxes(config.layout,out.width,out.height)
@@ -135,7 +143,7 @@ def build_ffmpeg_command(config:AppConfig, mode:str='stream')->list[str]:
     ]
 
     if mode=='stream':
-        cmd += ['-f','flv',out.endpoint.rstrip('/')+'/'+out.stream_key.strip()]
+        cmd += ['-f','flv',endpoint.rstrip('/')+'/'+stream_key]
     else:
         cmd += [_record_path(out.record_path)]
     return cmd
