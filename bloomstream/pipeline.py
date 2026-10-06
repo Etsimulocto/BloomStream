@@ -56,35 +56,76 @@ def build_ffmpeg_command(config:AppConfig, mode:str='stream')->list[str]:
     if mode not in {'stream','record'}: raise PipelineError('mode must be stream or record')
     out=config.output
     if mode=='stream' and (not out.endpoint or not out.stream_key): raise PipelineError('Streaming endpoint and stream key are required.')
+
     cmd=['ffmpeg','-hide_banner','-loglevel','warning','-y']
     boxes=_layout_boxes(config.layout,out.width,out.height)
-    for panel in config.panels[:4]: cmd += _video_input_args(panel.source,out.fps)
+
+    # FFmpeg requires every input to be declared before output options such as
+    # -filter_complex and -map. Keep all video/audio inputs together here.
+    for panel in config.panels[:4]:
+        cmd += _video_input_args(panel.source,out.fps)
+
     audio_inputs=[]
     for src in config.audio:
         args=_audio_input_args(src)
-        if args: cmd += args; audio_inputs.append(src)
+        if args:
+            cmd += args
+            audio_inputs.append(src)
+
+    silent_audio_index=None
+    if not audio_inputs:
+        silent_audio_index=4
+        cmd += ['-f','lavfi','-i',f'anullsrc=channel_layout=stereo:sample_rate={out.sample_rate}']
+
     filters=[]
-    for i,(x,y,w,h) in enumerate(boxes): filters.append(f'[{i}:v]{_transform_chain(config.panels[i].source,max(1,w),max(1,h))}[v{i}]')
+    for i,(x,y,w,h) in enumerate(boxes):
+        filters.append(f'[{i}:v]{_transform_chain(config.panels[i].source,max(1,w),max(1,h))}[v{i}]')
     filters.append(f'color=c=black:s={out.width}x{out.height}:r={out.fps}[base]')
+
     last='base'
     for i,(x,y,w,h) in enumerate(boxes):
-        nxt=f'mix{i}'; enable='0' if w<=1 or h<=1 else '1'; filters.append(f"[{last}][v{i}]overlay={x}:{y}:enable='{enable}'[{nxt}]"); last=nxt
-    map_audio=False
+        nxt=f'mix{i}'
+        enable='0' if w<=1 or h<=1 else '1'
+        filters.append(f"[{last}][v{i}]overlay={x}:{y}:enable='{enable}'[{nxt}]")
+        last=nxt
+
     if audio_inputs:
         labels=[]
         for j,src in enumerate(audio_inputs):
-            idx=4+j; label=f'a{j}'; af=[f'volume={float(src.gain_db)}dB']
-            if src.mode=='mono': af.append('pan=stereo|c0=c0|c1=c0')
+            idx=4+j
+            label=f'a{j}'
+            af=[f'volume={float(src.gain_db)}dB']
+            if src.mode=='mono':
+                af.append('pan=stereo|c0=c0|c1=c0')
             elif abs(src.pan)>0.001:
-                p=max(-1.0,min(1.0,float(src.pan))); left=1.0 if p<=0 else 1.0-p; right=1.0 if p>=0 else 1.0+p
+                p=max(-1.0,min(1.0,float(src.pan)))
+                left=1.0 if p<=0 else 1.0-p
+                right=1.0 if p>=0 else 1.0+p
                 af.append(f'pan=stereo|c0={left:.3f}*c0|c1={right:.3f}*c1')
-            filters.append(f"[{idx}:a]{','.join(af)}[{label}]"); labels.append(f'[{label}]')
-        filters.append(''.join(labels)+f'amix=inputs={len(labels)}:normalize=0[aout]'); map_audio=True
+            filters.append(f"[{idx}:a]{','.join(af)}[{label}]")
+            labels.append(f'[{label}]')
+        filters.append(''.join(labels)+f'amix=inputs={len(labels)}:normalize=0[aout]')
+
     cmd += ['-filter_complex',';'.join(filters),'-map',f'[{last}]']
-    if map_audio: cmd += ['-map','[aout]']
-    else: cmd += ['-f','lavfi','-i',f'anullsrc=channel_layout=stereo:sample_rate={out.sample_rate}','-map','4:a']
-    cmd += ['-r',str(out.fps),'-c:v','libx264','-preset',out.preset,'-tune','zerolatency','-pix_fmt','yuv420p','-b:v',f'{out.video_bitrate_kbps}k','-maxrate',f'{out.video_bitrate_kbps}k','-bufsize',f'{out.video_bitrate_kbps*2}k','-g',str(out.fps*2),'-c:a','aac','-b:a',f'{out.audio_bitrate_kbps}k','-ar',str(out.sample_rate),'-ac','2']
-    if mode=='stream': cmd += ['-f','flv',out.endpoint.rstrip('/')+'/'+out.stream_key.strip()]
+    if audio_inputs:
+        cmd += ['-map','[aout]']
+    else:
+        cmd += ['-map',f'{silent_audio_index}:a']
+
+    cmd += [
+        '-r',str(out.fps),
+        '-c:v','libx264','-preset',out.preset,'-tune','zerolatency',
+        '-pix_fmt','yuv420p',
+        '-b:v',f'{out.video_bitrate_kbps}k',
+        '-maxrate',f'{out.video_bitrate_kbps}k',
+        '-bufsize',f'{out.video_bitrate_kbps*2}k',
+        '-g',str(out.fps*2),
+        '-c:a','aac','-b:a',f'{out.audio_bitrate_kbps}k',
+        '-ar',str(out.sample_rate),'-ac','2'
+    ]
+
+    if mode=='stream':
+        cmd += ['-f','flv',out.endpoint.rstrip('/')+'/'+out.stream_key.strip()]
     else:
         path=out.record_path or str(Path.home()/'Videos'/'BloomStream-%Y%m%d-%H%M%S.mkv')
         cmd += ['-strftime','1',path]
