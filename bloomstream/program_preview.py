@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import struct
 import subprocess
 import threading
 from typing import Callable
@@ -12,7 +10,6 @@ from .pipeline import _layout_boxes, _transform_chain, _video_input_args
 PREVIEW_W = 640
 PREVIEW_H = 360
 PREVIEW_FPS = 2
-PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
 
 
 def build_program_preview_command(config: AppConfig) -> list[str]:
@@ -45,11 +42,27 @@ def build_program_preview_command(config: AppConfig) -> list[str]:
         '-map', '[preview]',
         '-an',
         '-f', 'image2pipe',
-        '-vcodec', 'png',
-        '-compression_level', '3',
+        '-vcodec', 'ppm',
         '-'
     ]
     return cmd
+
+
+def _read_token(stream) -> bytes:
+    token = bytearray()
+    while True:
+        b = stream.read(1)
+        if not b:
+            return bytes(token)
+        if b == b'#':
+            while b not in (b'\n', b''):
+                b = stream.read(1)
+            continue
+        if b.isspace():
+            if token:
+                return bytes(token)
+            continue
+        token.extend(b)
 
 
 def _read_exact(stream, size: int) -> bytes | None:
@@ -62,25 +75,22 @@ def _read_exact(stream, size: int) -> bytes | None:
     return bytes(data)
 
 
-def _read_png(stream) -> bytes | None:
-    signature = _read_exact(stream, len(PNG_SIGNATURE))
-    if signature != PNG_SIGNATURE:
+def _read_ppm(stream) -> bytes | None:
+    if _read_token(stream) != b'P6':
         return None
-
-    out = bytearray(signature)
-    while True:
-        header = _read_exact(stream, 8)
-        if header is None:
-            return None
-        length = struct.unpack('>I', header[:4])[0]
-        chunk_type = header[4:8]
-        payload_and_crc = _read_exact(stream, length + 4)
-        if payload_and_crc is None:
-            return None
-        out.extend(header)
-        out.extend(payload_and_crc)
-        if chunk_type == b'IEND':
-            return bytes(out)
+    try:
+        width = int(_read_token(stream))
+        height = int(_read_token(stream))
+        maxval = int(_read_token(stream))
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0 or maxval != 255:
+        return None
+    payload = _read_exact(stream, width * height * 3)
+    if payload is None:
+        return None
+    header = f'P6\n{width} {height}\n255\n'.encode('ascii')
+    return header + payload
 
 
 class ProgramPreviewWorker:
@@ -89,7 +99,7 @@ class ProgramPreviewWorker:
     def __init__(
         self,
         config: AppConfig,
-        on_frame: Callable[[str], None],
+        on_frame: Callable[[bytes], None],
         on_error: Callable[[str], None],
         on_exit: Callable[[], None],
     ):
@@ -126,10 +136,12 @@ class ProgramPreviewWorker:
             return
         try:
             while not self._stop.is_set():
-                frame = _read_png(p.stdout)
+                frame = _read_ppm(p.stdout)
                 if frame is None:
                     break
-                self.on_frame(base64.b64encode(frame).decode('ascii'))
+                # tkinter.PhotoImage accepts PPM bytes directly. Do not base64-wrap
+                # PPM while also telling Tk the format is PPM.
+                self.on_frame(frame)
         finally:
             if not self._stop.is_set() and p.poll() not in (0, None):
                 msg = ''
