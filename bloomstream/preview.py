@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import subprocess
 import threading
 from typing import Callable
@@ -75,6 +76,12 @@ def _read_token(stream) -> bytes:
 
 
 def _read_ppm(stream) -> bytes | None:
+    """Read one P6 frame and return base64 data safe for Tk PhotoImage.
+
+    Passing raw P6 bytes through tkinter's Tcl argument bridge is unreliable
+    because the pixel payload contains NUL bytes.  Tk accepts base64 image data,
+    so encode each complete frame before handing it to the UI thread.
+    """
     magic = _read_token(stream)
     if magic != b'P6':
         return None
@@ -90,7 +97,7 @@ def _read_ppm(stream) -> bytes | None:
     if len(payload) != width * height * 3:
         return None
     header = f'P6\n{width} {height}\n255\n'.encode('ascii')
-    return header + payload
+    return base64.b64encode(header + payload)
 
 
 class PreviewWorker:
@@ -139,13 +146,20 @@ class PreviewWorker:
             self.on_error(self.panel_index, msg or 'preview stopped')
 
     def stop(self) -> None:
+        """Stop a preview quickly; never hold the Tk close path for seconds."""
         self._stop.set()
         p = self.process
         self.process = None
         if p and p.poll() is None:
-            p.terminate()
             try:
-                p.wait(timeout=1)
+                p.terminate()
+                p.wait(timeout=0.15)
             except subprocess.TimeoutExpired:
-                p.kill()
+                try:
+                    p.kill()
+                    p.wait(timeout=0.15)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+            except OSError:
+                pass
         self.thread = None
