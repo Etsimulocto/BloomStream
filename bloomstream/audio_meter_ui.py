@@ -84,7 +84,7 @@ def install_audio_meter(app_class):
         if getattr(self, 'closing', False):
             return
 
-        device = self._selected_meter_device(self)
+        device = self._selected_meter_device()
         if device == getattr(self, 'audio_meter_device', ''):
             return
 
