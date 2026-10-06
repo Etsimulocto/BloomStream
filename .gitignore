@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log
+*.pid
+.DS_Store
+
+# Local BloomStream state / secrets
+config.local.json
+secrets.json
+stream_keys.json
+recordings/
