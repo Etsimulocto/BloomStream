@@ -4,25 +4,62 @@ import subprocess
 import threading
 from typing import Callable
 
-from .model import AppConfig
-from .pipeline import _layout_boxes, _transform_chain, _video_input_args
+from .devices import detect_display
+from .model import AppConfig, VideoSource
+from .pipeline import _layout_boxes, _transform_chain
 
 PREVIEW_W = 640
 PREVIEW_H = 360
 PREVIEW_FPS = 2
 
 
-def build_program_preview_command(config: AppConfig) -> list[str]:
-    """Build one low-rate FFmpeg process for the composed PROGRAM preview.
+def _preview_input_args(src: VideoSource) -> list[str]:
+    """Capture preview sources at preview rate instead of their program rate.
 
-    When only one non-blank visual source is active, preview it full-frame so the
-    monitor is useful instead of showing a single tiny quadrant. With two or
-    more active sources, use the selected program layout normally.
+    Keep known-good camera resolution/pixel format intact so USB cameras are not
+    forced into an unsupported mode, but only request the two frames per second
+    that the preview can actually display.
     """
-    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin']
+    fps = PREVIEW_FPS
+    if not src.enabled or src.kind == 'blank':
+        return ['-f', 'lavfi', '-r', str(fps), '-i', 'color=c=black:s=640x360']
+    if src.kind == 'test':
+        return ['-f', 'lavfi', '-r', str(fps), '-i', f'testsrc2=size=640x360:rate={fps}']
+    if src.kind == 'screen':
+        return [
+            '-f', 'x11grab', '-framerate', str(fps),
+            '-video_size', f'{src.width}x{src.height}',
+            '-i', f'{detect_display()}+{src.x},{src.y}',
+        ]
+    if src.kind == 'area':
+        return [
+            '-f', 'x11grab', '-framerate', str(fps),
+            '-video_size', f'{src.area_width}x{src.area_height}',
+            '-i', f'{detect_display()}+{src.x},{src.y}',
+        ]
+    if src.kind == 'v4l2':
+        args = ['-thread_queue_size', '2', '-f', 'v4l2', '-framerate', str(fps)]
+        if src.width and src.height:
+            args += ['-video_size', f'{src.width}x{src.height}']
+        if src.pixel_format:
+            args += ['-input_format', src.pixel_format]
+        return args + ['-i', src.device]
+    raise ValueError(f'Preview unsupported for source kind: {src.kind}')
+
+
+def build_program_preview_command(config: AppConfig) -> list[str]:
+    """Build one deliberately low-load FFmpeg process for PROGRAM preview.
+
+    Preview capture is throttled at the input boundary. RECORD/LIVE continues to
+    use the normal pipeline and is intentionally unaffected by this module.
+    """
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
+        '-filter_complex_threads', '1',
+    ]
 
     for panel in config.panels[:4]:
-        cmd += _video_input_args(panel.source, config.output.fps)
+        cmd += _preview_input_args(panel.source)
 
     active = [
         i for i, panel in enumerate(config.panels[:4])
@@ -174,7 +211,7 @@ class ProgramPreviewWorker:
         if p and p.poll() is None:
             p.terminate()
             try:
-                p.wait(timeout=0.75)
+                p.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
                 p.kill()
         self.thread = None
