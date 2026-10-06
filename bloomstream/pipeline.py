@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime
 from pathlib import Path
 import shlex
 from typing import Iterable
@@ -52,6 +53,13 @@ def _transform_chain(src: VideoSource, w:int, h:int)->str:
     fs.append('setsar=1')
     return ','.join(fs)
 
+def _record_path(template: str) -> str:
+    raw = template or str(Path.home()/'Videos'/'BloomStream-%Y%m%d-%H%M%S.mkv')
+    try:
+        return datetime.now().strftime(raw)
+    except Exception:
+        return raw
+
 def build_ffmpeg_command(config:AppConfig, mode:str='stream')->list[str]:
     if mode not in {'stream','record'}: raise PipelineError('mode must be stream or record')
     out=config.output
@@ -60,8 +68,6 @@ def build_ffmpeg_command(config:AppConfig, mode:str='stream')->list[str]:
     cmd=['ffmpeg','-hide_banner','-loglevel','warning','-y']
     boxes=_layout_boxes(config.layout,out.width,out.height)
 
-    # Declare all inputs first. Hidden layout slots may still have source inputs,
-    # but they are intentionally omitted from the filter graph below.
     for panel in config.panels[:4]:
         cmd += _video_input_args(panel.source,out.fps)
 
@@ -77,9 +83,6 @@ def build_ffmpeg_command(config:AppConfig, mode:str='stream')->list[str]:
         silent_audio_index=4
         cmd += ['-f','lavfi','-i',f'anullsrc=channel_layout=stereo:sample_rate={out.sample_rate}']
 
-    # A box of 1x1 is our sentinel for a hidden panel. Do not try to scale or
-    # pad a real source down to that sentinel size; simply leave it out of the
-    # compositor entirely.
     visible=[]
     filters=[]
     for i,(x,y,w,h) in enumerate(boxes):
@@ -134,8 +137,7 @@ def build_ffmpeg_command(config:AppConfig, mode:str='stream')->list[str]:
     if mode=='stream':
         cmd += ['-f','flv',out.endpoint.rstrip('/')+'/'+out.stream_key.strip()]
     else:
-        path=out.record_path or str(Path.home()/'Videos'/'BloomStream-%Y%m%d-%H%M%S.mkv')
-        cmd += ['-strftime','1',path]
+        cmd += [_record_path(out.record_path)]
     return cmd
 
 def shell_preview(command:Iterable[str], hide_secret:str='')->str:
