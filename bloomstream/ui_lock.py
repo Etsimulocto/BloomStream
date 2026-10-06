@@ -5,10 +5,10 @@ from tkinter import ttk
 
 
 def install_ui_lock(app_class):
-    """Add Pi-safe control locking without changing capture/encode code.
+    """Add a hard Pi-safe UI lock around preview and output modes.
 
     Modes:
-      idle    -> controls available normally
+      idle    -> normal editing controls
       preview -> only PREVIEW OFF remains usable
       output  -> only STOP remains usable
     """
@@ -21,61 +21,107 @@ def install_ui_lock(app_class):
     original_output_done = app_class._output_done
     original_stop_output = app_class.stop_output
 
-    def _set_widget_locked(widget, locked: bool, allowed: set[tk.Misc]):
-        if widget in allowed:
-            try:
-                widget.configure(state='normal')
-            except tk.TclError:
-                pass
-        else:
-            if isinstance(widget, ttk.Notebook):
-                try:
-                    for tab_id in widget.tabs():
-                        widget.tab(tab_id, state='disabled' if locked else 'normal')
-                except tk.TclError:
-                    pass
-            elif isinstance(widget, ttk.Combobox):
-                try:
-                    widget.configure(state='disabled' if locked else 'readonly')
-                except tk.TclError:
-                    pass
-            elif isinstance(widget, (ttk.Button, ttk.Entry, ttk.Spinbox, ttk.Scale, ttk.Checkbutton)):
-                try:
-                    widget.configure(state='disabled' if locked else 'normal')
-                except tk.TclError:
-                    pass
-            elif isinstance(widget, tk.Text):
-                try:
-                    widget.configure(state='disabled' if locked else 'normal')
-                except tk.TclError:
-                    pass
-
+    def _walk(widget):
+        yield widget
         try:
             for child in widget.winfo_children():
-                _set_widget_locked(child, locked, allowed)
+                yield from _walk(child)
+        except tk.TclError:
+            return
+
+    def _disable_widget(widget):
+        try:
+            if isinstance(widget, ttk.Notebook):
+                for tab_id in widget.tabs():
+                    widget.tab(tab_id, state='disabled')
+                return
+
+            if isinstance(widget, ttk.Widget):
+                # ttk's state API is more reliable across widget subclasses
+                # than configure(state=...) checks on Raspberry Pi/Tk builds.
+                widget.state(['disabled'])
+                return
+
+            if isinstance(widget, (tk.Text, tk.Entry, tk.Button, tk.Scale, tk.Checkbutton, tk.Spinbox, tk.Listbox)):
+                widget.configure(state='disabled')
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _enable_widget(widget):
+        try:
+            if isinstance(widget, ttk.Notebook):
+                for tab_id in widget.tabs():
+                    widget.tab(tab_id, state='normal')
+                return
+
+            if isinstance(widget, ttk.Combobox):
+                widget.state(['!disabled', 'readonly'])
+                return
+
+            if isinstance(widget, ttk.Widget):
+                widget.state(['!disabled'])
+                return
+
+            if isinstance(widget, (tk.Text, tk.Entry, tk.Button, tk.Scale, tk.Checkbutton, tk.Spinbox, tk.Listbox)):
+                widget.configure(state='normal')
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _lock_all(self):
+        for widget in _walk(self):
+            if widget is self:
+                continue
+            _disable_widget(widget)
+
+    def _unlock_all(self):
+        for widget in _walk(self):
+            if widget is self:
+                continue
+            _enable_widget(widget)
+
+        # These two buttons have special idle-state behavior.
+        try:
+            self.preview_btn.state(['!disabled'])
+            self.preview_btn.configure(text='PREVIEW ON')
+        except tk.TclError:
+            pass
+        try:
+            self.stop_btn.state(['disabled'])
         except tk.TclError:
             pass
 
     def _apply_lock(self, mode: str):
-        if getattr(self, '_ui_lock_mode', None) == mode:
+        self._ui_lock_mode = mode
+
+        if mode == 'preview':
+            _lock_all(self)
+            # The current Mixer tab must remain visible, but other notebook tabs
+            # stay disabled. Only PREVIEW OFF is re-enabled.
+            try:
+                self.preview_btn.state(['!disabled'])
+                self.preview_btn.configure(text='PREVIEW OFF')
+            except tk.TclError:
+                pass
+            try:
+                self.stop_btn.state(['disabled'])
+            except tk.TclError:
+                pass
+            self.status.set('PREVIEW • controls locked for Pi safety')
             return
 
-        self._ui_lock_mode = mode
-        if mode == 'preview':
-            allowed = {self.preview_btn}
-            _set_widget_locked(self, True, allowed)
-            self.preview_btn.configure(state='normal', text='PREVIEW OFF')
-            self.stop_btn.configure(state='disabled')
-            self.status.set('PREVIEW • controls locked for Pi safety')
-        elif mode == 'output':
-            allowed = {self.stop_btn}
-            _set_widget_locked(self, True, allowed)
-            self.stop_btn.configure(state='normal')
-            self.preview_btn.configure(state='disabled')
-        else:
-            _set_widget_locked(self, False, set())
-            self.preview_btn.configure(state='normal', text='PREVIEW ON')
-            self.stop_btn.configure(state='disabled')
+        if mode == 'output':
+            _lock_all(self)
+            try:
+                self.stop_btn.state(['!disabled'])
+            except tk.TclError:
+                pass
+            try:
+                self.preview_btn.state(['disabled'])
+            except tk.TclError:
+                pass
+            return
+
+        _unlock_all(self)
 
     def __init__(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
