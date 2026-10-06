@@ -13,13 +13,29 @@ PREVIEW_FPS = 2
 
 
 def build_program_preview_command(config: AppConfig) -> list[str]:
-    """Build one low-rate FFmpeg process for the composed PROGRAM preview."""
+    """Build one low-rate FFmpeg process for the composed PROGRAM preview.
+
+    When only one non-blank visual source is active, preview it full-frame so the
+    monitor is useful instead of showing a single tiny quadrant. With two or
+    more active sources, use the selected program layout normally.
+    """
     cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin']
 
     for panel in config.panels[:4]:
         cmd += _video_input_args(panel.source, config.output.fps)
 
-    boxes = _layout_boxes(config.layout, PREVIEW_W, PREVIEW_H)
+    active = [
+        i for i, panel in enumerate(config.panels[:4])
+        if panel.source.enabled and panel.source.kind != 'blank'
+    ]
+
+    if len(active) == 1:
+        only = active[0]
+        boxes = [(0, 0, 1, 1) for _ in range(4)]
+        boxes[only] = (0, 0, PREVIEW_W, PREVIEW_H)
+    else:
+        boxes = _layout_boxes(config.layout, PREVIEW_W, PREVIEW_H)
+
     filters: list[str] = []
     visible: list[tuple[int, int, int]] = []
 
@@ -139,8 +155,6 @@ class ProgramPreviewWorker:
                 frame = _read_ppm(p.stdout)
                 if frame is None:
                     break
-                # tkinter.PhotoImage accepts PPM bytes directly. Do not base64-wrap
-                # PPM while also telling Tk the format is PPM.
                 self.on_frame(frame)
         finally:
             if not self._stop.is_set() and p.poll() not in (0, None):
