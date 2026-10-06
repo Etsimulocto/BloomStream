@@ -134,7 +134,7 @@ class BloomStreamApp(tk.Tk):
         try: cmd=build_ffmpeg_command(self.config_data,mode)
         except PipelineError as e: messagebox.showerror('BloomStream',str(e)); return
         self.cmd.delete('1.0','end'); self.cmd.insert('1.0',shell_preview(cmd,self.config_data.output.stream_key)+'\n\n')
-        try: self.process=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True,bufsize=1)
+        try: self.process=subprocess.Popen(cmd,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True,bufsize=1)
         except FileNotFoundError: messagebox.showerror('BloomStream','ffmpeg not found. Run ./install.sh'); return
         self.stop_btn.configure(state='normal'); self.status.set('LIVE' if mode=='stream' else 'RECORDING'); threading.Thread(target=self._watch,daemon=True).start()
 
@@ -149,9 +149,16 @@ class BloomStreamApp(tk.Tk):
 
     def stop_output(self):
         if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try: self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired: self.process.kill()
+            try:
+                if self.process.stdin:
+                    self.process.stdin.write('q\n')
+                    self.process.stdin.flush()
+                self.process.wait(timeout=5)
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                if self.process.poll() is None:
+                    self.process.terminate()
+                    try: self.process.wait(timeout=2)
+                    except subprocess.TimeoutExpired: self.process.kill()
         self.status.set('Stopped'); self.stop_btn.configure(state='disabled')
 
     def _drain(self):
