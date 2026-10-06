@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import struct
 import subprocess
 import threading
 from typing import Callable
@@ -11,19 +12,13 @@ from .pipeline import _layout_boxes, _transform_chain, _video_input_args
 PREVIEW_W = 640
 PREVIEW_H = 360
 PREVIEW_FPS = 2
+PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
 
 
 def build_program_preview_command(config: AppConfig) -> list[str]:
-    """Build one FFmpeg process that previews the composed PROGRAM feed.
-
-    This intentionally uses the same four source assignments/layout rules as the
-    recorder, but produces only a small 640x360 @ 2 fps PPM stream for Tk.
-    No audio, no H.264 encoder, and no automatic startup.
-    """
+    """Build one low-rate FFmpeg process for the composed PROGRAM preview."""
     cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin']
 
-    # Keep source capture settings identical to the proven recording path.
-    # The compositor immediately scales them down to preview resolution.
     for panel in config.panels[:4]:
         cmd += _video_input_args(panel.source, config.output.fps)
 
@@ -50,45 +45,42 @@ def build_program_preview_command(config: AppConfig) -> list[str]:
         '-map', '[preview]',
         '-an',
         '-f', 'image2pipe',
-        '-vcodec', 'ppm',
+        '-vcodec', 'png',
+        '-compression_level', '3',
         '-'
     ]
     return cmd
 
 
-def _read_token(stream) -> bytes:
-    token = bytearray()
+def _read_exact(stream, size: int) -> bytes | None:
+    data = bytearray()
+    while len(data) < size:
+        chunk = stream.read(size - len(data))
+        if not chunk:
+            return None
+        data.extend(chunk)
+    return bytes(data)
+
+
+def _read_png(stream) -> bytes | None:
+    signature = _read_exact(stream, len(PNG_SIGNATURE))
+    if signature != PNG_SIGNATURE:
+        return None
+
+    out = bytearray(signature)
     while True:
-        b = stream.read(1)
-        if not b:
-            return bytes(token)
-        if b == b'#':
-            while b not in (b'\n', b''):
-                b = stream.read(1)
-            continue
-        if b.isspace():
-            if token:
-                return bytes(token)
-            continue
-        token.extend(b)
-
-
-def _read_ppm(stream) -> bytes | None:
-    if _read_token(stream) != b'P6':
-        return None
-    try:
-        width = int(_read_token(stream))
-        height = int(_read_token(stream))
-        maxval = int(_read_token(stream))
-    except (TypeError, ValueError):
-        return None
-    if width <= 0 or height <= 0 or maxval != 255:
-        return None
-    payload = stream.read(width * height * 3)
-    if len(payload) != width * height * 3:
-        return None
-    header = f'P6\n{width} {height}\n255\n'.encode('ascii')
-    return header + payload
+        header = _read_exact(stream, 8)
+        if header is None:
+            return None
+        length = struct.unpack('>I', header[:4])[0]
+        chunk_type = header[4:8]
+        payload_and_crc = _read_exact(stream, length + 4)
+        if payload_and_crc is None:
+            return None
+        out.extend(header)
+        out.extend(payload_and_crc)
+        if chunk_type == b'IEND':
+            return bytes(out)
 
 
 class ProgramPreviewWorker:
@@ -134,10 +126,9 @@ class ProgramPreviewWorker:
             return
         try:
             while not self._stop.is_set():
-                frame = _read_ppm(p.stdout)
+                frame = _read_png(p.stdout)
                 if frame is None:
                     break
-                # Tk PhotoImage is safest with ASCII/base64 transport.
                 self.on_frame(base64.b64encode(frame).decode('ascii'))
         finally:
             if not self._stop.is_set() and p.poll() not in (0, None):
