@@ -60,8 +60,8 @@ def build_ffmpeg_command(config:AppConfig, mode:str='stream')->list[str]:
     cmd=['ffmpeg','-hide_banner','-loglevel','warning','-y']
     boxes=_layout_boxes(config.layout,out.width,out.height)
 
-    # FFmpeg requires every input to be declared before output options such as
-    # -filter_complex and -map. Keep all video/audio inputs together here.
+    # Declare all inputs first. Hidden layout slots may still have source inputs,
+    # but they are intentionally omitted from the filter graph below.
     for panel in config.panels[:4]:
         cmd += _video_input_args(panel.source,out.fps)
 
@@ -77,16 +77,23 @@ def build_ffmpeg_command(config:AppConfig, mode:str='stream')->list[str]:
         silent_audio_index=4
         cmd += ['-f','lavfi','-i',f'anullsrc=channel_layout=stereo:sample_rate={out.sample_rate}']
 
+    # A box of 1x1 is our sentinel for a hidden panel. Do not try to scale or
+    # pad a real source down to that sentinel size; simply leave it out of the
+    # compositor entirely.
+    visible=[]
     filters=[]
     for i,(x,y,w,h) in enumerate(boxes):
-        filters.append(f'[{i}:v]{_transform_chain(config.panels[i].source,max(1,w),max(1,h))}[v{i}]')
+        if w<=1 or h<=1:
+            continue
+        filters.append(f'[{i}:v]{_transform_chain(config.panels[i].source,w,h)}[v{i}]')
+        visible.append((i,x,y))
+
     filters.append(f'color=c=black:s={out.width}x{out.height}:r={out.fps}[base]')
 
     last='base'
-    for i,(x,y,w,h) in enumerate(boxes):
-        nxt=f'mix{i}'
-        enable='0' if w<=1 or h<=1 else '1'
-        filters.append(f"[{last}][v{i}]overlay={x}:{y}:enable='{enable}'[{nxt}]")
+    for mix_index,(i,x,y) in enumerate(visible):
+        nxt=f'mix{mix_index}'
+        filters.append(f'[{last}][v{i}]overlay={x}:{y}[{nxt}]')
         last=nxt
 
     if audio_inputs:
